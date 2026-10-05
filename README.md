@@ -13,6 +13,11 @@ command-line interface.
 - Delete entries using `DELETE`.
 - Report missing keys.
 - Validate command arguments.
+- Mutex-protected storage operations.
+- Optional TTL with lazy expiration.
+- TCP server supporting PUT, GET, DELETE, and EXIT.
+- Newline-delimited commands with partial-read/write handling.
+- Shared in-memory data across successive client connections.
 
 ## Requirements
 

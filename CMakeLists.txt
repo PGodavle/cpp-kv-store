@@ -27,3 +27,19 @@ target_link_libraries(kv_store_thread_test PRIVATE Threads::Threads)
 target_compile_options(kv_store_thread_test PRIVATE
     -Wall -Wextra -Wpedantic
 )
+
+add_executable(kv_server
+    src/server.cpp
+    src/KeyValueStore.cpp
+    src/CommandHandler.cpp
+)
+
+target_include_directories(kv_server PRIVATE include)
+
+target_link_libraries(kv_server PRIVATE Threads::Threads)
+
+target_compile_options(kv_server PRIVATE
+    -Wall
+    -Wextra
+    -Wpedantic
+)

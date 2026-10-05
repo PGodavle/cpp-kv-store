@@ -7,16 +7,21 @@
 class KeyValueStore
 {
 public:
-    void put(const std::string& key, const std::string& value);
+     void put(const std::string& key,
+             const std::string& value,
+             int ttlSeconds = 0);
 
-    bool get(const std::string& key, std::string& value) const;
+    bool get(const std::string& key, std::string& value);
 
     bool remove(const std::string& key);
 
 private:
-    std::unordered_map<std::string, std::string> data_;
+    struct Entry{
+        std::string value;
+        bool hasExpiry = false;
+        std::chrono::steady_clock::time_point expiresAt{};
+    };
+    std::unordered_map<std::string, Entry> data_;
     mutable std::mutex mutex_;
-    /*why mutable? Because we want to allow const member functions (like get) to modify the mutex 
-     for thread safety, even though they don't modify the actual data. This allows us to lock the
-     mutex in const functions without violating const-correctness.*/
+    //why
 };

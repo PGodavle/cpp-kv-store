@@ -10,7 +10,10 @@ int main()
     std::string line;
 
     std::cout << "C++ Key-Value Store\n";
-    std::cout << "Commands: PUT key value, GET key, DELETE key, EXIT\n";
+    std::cout << "Commands: PUT key value [ttl_seconds], "
+             "GET key, DELETE key, EXIT\n";
+
+    std::cout << "TTL is optional. Use 0 for no expiration.\n";
     std::cout << "Use single-word keys and values.\n";
 
     while (true)
@@ -38,14 +41,41 @@ int main()
 
         if (command == "PUT")
         {
-            if (!(input >> key >> value) || (input >> extra))
+        // Key and value are required.
+        if (!(input >> key >> value))
+        {
+            std::cout << "Usage: PUT key value [ttl_seconds]\n";
+            continue;
+        }
+
+        int ttlSeconds = 0;
+        std::string ttlText;
+
+        // Read TTL only if another word is present.
+        if (input >> ttlText)
+        {
+            std::istringstream ttlInput(ttlText);
+            char leftover;
+
+            if (!(ttlInput >> ttlSeconds)
+                || ttlSeconds < 0
+                || (ttlInput >> leftover))
             {
-                std::cout << "Usage: PUT key value\n";
+                std::cout << "TTL must be a non-negative integer "
+                            "within the int range\n";
                 continue;
             }
+        }
 
-            store.put(key, value);
-            std::cout << "OK\n";
+        // Reject anything after the optional TTL.
+        if (input >> extra)
+        {
+            std::cout << "Usage: PUT key value [ttl_seconds]\n";
+            continue;
+        }
+
+        store.put(key, value, ttlSeconds);
+        std::cout << "OK\n";
         }
         else if (command == "GET")
         {
