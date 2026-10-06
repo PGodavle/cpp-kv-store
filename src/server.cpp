@@ -1,8 +1,12 @@
 #include <cerrno>
+#include <charconv>
 #include <cstdio>
+#include <cstdint>
 #include <iostream>
+#include <limits>
 #include <string>
 #include <set>
+#include <vector>
 
 #include <poll.h>
 #include <pthread.h>
@@ -15,6 +19,7 @@
 #include <functional>
 #include <thread>
 #include <sys/time.h>
+#include <stdexcept>
 #include "WriteAheadLog.h"
 
 #include "ConnectionQueue.h"
@@ -63,6 +68,116 @@ private:
 };
 
 bool sendAll(int clientSocket, const std::string& message);
+
+struct ServerConfig
+{
+    std::string host = "127.0.0.1";
+    std::uint16_t port = 9090;
+    std::size_t workerCount = 4;
+    std::size_t queueCapacity = 8;
+    std::string walPath = "data/store.wal";
+};
+
+static void printUsage(const char* program)
+{
+    std::cout << "Usage: " << program
+              << " [--host IPv4] [--port PORT] [--workers COUNT]"
+              << " [--queue-capacity COUNT] [--wal PATH]\n";
+}
+
+static unsigned long long parseNumber(const std::string& text,
+                                      const std::string& option)
+{
+    unsigned long long value = 0;
+    const char* begin = text.data();
+    const char* end = begin + text.size();
+    auto result = std::from_chars(begin, end, value);
+
+    if (text.empty() || result.ec != std::errc() || result.ptr != end)
+    {
+        throw std::invalid_argument("Invalid value for " + option);
+    }
+
+    return value;
+}
+
+static ServerConfig parseArguments(int argc, char** argv)
+{
+    ServerConfig config;
+
+    for (int i = 1; i < argc; i++)
+    {
+        std::string option = argv[i];
+
+        if (option == "--help")
+        {
+            printUsage(argv[0]);
+            std::exit(0);
+        }
+
+        if (i + 1 >= argc)
+        {
+            throw std::invalid_argument("Missing value for " + option);
+        }
+
+        std::string value = argv[++i];
+
+        if (option == "--host")
+        {
+            config.host = value;
+        }
+        else if (option == "--port")
+        {
+            unsigned long long port = parseNumber(value, option);
+
+            if (port == 0 || port > 65535)
+            {
+                throw std::invalid_argument("Port must be from 1 to 65535");
+            }
+
+            config.port = static_cast<std::uint16_t>(port);
+        }
+        else if (option == "--workers")
+        {
+            unsigned long long workers = parseNumber(value, option);
+
+            if (workers == 0 || workers > 128)
+            {
+                throw std::invalid_argument("Workers must be from 1 to 128");
+            }
+
+            config.workerCount = static_cast<std::size_t>(workers);
+        }
+        else if (option == "--queue-capacity")
+        {
+            unsigned long long capacity = parseNumber(value, option);
+
+            if (capacity == 0 || capacity > 65536)
+            {
+                throw std::invalid_argument(
+                    "Queue capacity must be from 1 to 65536"
+                );
+            }
+
+            config.queueCapacity = static_cast<std::size_t>(capacity);
+        }
+        else if (option == "--wal")
+        {
+            config.walPath = value;
+        }
+        else
+        {
+            throw std::invalid_argument("Unknown option: " + option);
+        }
+    }
+
+    if (config.walPath.empty())
+    {
+        throw std::invalid_argument("WAL path cannot be empty");
+    }
+
+    return config;
+}
 
 // send() may send fewer bytes than requested.
 // Keep sending until the entire message is sent.
@@ -208,7 +323,7 @@ void workerLoop(
             {
                 if (sendAll(
                         clientSocket,
-                        "Welcome! Use PUT, GET, DELETE, EXIT\n"))
+                            "Welcome! Use PUT, GET, DELETE, COMPACT, EXIT\n"))
                 {
                     handleClient(clientSocket, store);
                 }
@@ -265,7 +380,7 @@ bool sendAll(int clientSocket, const std::string& message)
     return true;
 }
 
-int runServer(KeyValueStore& store)
+int runServer(KeyValueStore& store, const ServerConfig& config)
 {
     // IPv4 + TCP.
     int serverSocket = socket(
@@ -298,8 +413,14 @@ int runServer(KeyValueStore& store)
     sockaddr_in address{};
 
     address.sin_family = AF_INET;
-    address.sin_port = htons(9090);
-    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    address.sin_port = htons(config.port);
+
+    if (inet_pton(AF_INET, config.host.c_str(), &address.sin_addr) != 1)
+    {
+        std::cerr << "Invalid IPv4 address: " << config.host << '\n';
+        close(serverSocket);
+        return 1;
+    }
 
     if (bind(
             serverSocket,
@@ -353,15 +474,14 @@ int runServer(KeyValueStore& store)
         return 1;
     }
 
-    ConnectionQueue queue(8);
+    ConnectionQueue queue(config.queueCapacity);
     ActiveClients clients;
 
-    const int workerCount = 4;
-    std::thread workers[workerCount];
+    std::vector<std::thread> workers(config.workerCount);
 
     try
     {
-        for (int i = 0; i < workerCount; i++)
+        for (std::size_t i = 0; i < workers.size(); i++)
         {
             workers[i] = std::thread(
                 workerLoop,
@@ -379,7 +499,7 @@ int runServer(KeyValueStore& store)
         clients.stopAll();
         queue.close();
 
-        for (int i = 0; i < workerCount; i++)
+        for (std::size_t i = 0; i < workers.size(); i++)
         {
             if (workers[i].joinable())
             {
@@ -403,7 +523,8 @@ int runServer(KeyValueStore& store)
 
     int exitCode = 1;
 
-    std::cout << "Server listening on 127.0.0.1:9090\n";
+    std::cout << "Server listening on " << config.host
+              << ':' << config.port << '\n';
     std::cout << "Press Ctrl+C to stop\n";
 
     while (true)
@@ -514,9 +635,9 @@ int runServer(KeyValueStore& store)
     clients.stopAll();     // Interrupt active socket operations.
     queue.close();         // Wake workers and drain queued sockets.
 
-    for (int i = 0; i < workerCount; i++)
+    for (std::thread& worker : workers)
     {
-        workers[i].join();
+        worker.join();
     }
 
     close(signalFd);
@@ -525,14 +646,15 @@ int runServer(KeyValueStore& store)
     return exitCode;
 
 }
-int main()
+int main(int argc, char** argv)
 {
     try
     {
-        WriteAheadLog log("data/store.wal");
+        ServerConfig config = parseArguments(argc, argv);
+        WriteAheadLog log(config.walPath);
         KeyValueStore store(&log);
 
-        return runServer(store);
+        return runServer(store, config);
     }
     catch (const std::exception& error)
     {

@@ -22,6 +22,125 @@ static void syncDescriptor(int descriptor)
     }
 }
 
+static std::string directoryFor(const std::string& path)
+{
+    std::size_t slash = path.find_last_of('/');
+
+    if (slash == std::string::npos)
+    {
+        return ".";
+    }
+
+    return slash == 0 ? "/" : path.substr(0, slash);
+}
+
+static void syncDirectory(const std::string& path)
+{
+    std::string directory = directoryFor(path);
+    int descriptor = open(
+        directory.c_str(),
+        O_RDONLY | O_DIRECTORY | O_CLOEXEC
+    );
+
+    if (descriptor == -1)
+    {
+        throw std::runtime_error(
+            "Cannot open directory: " + directory
+        );
+    }
+
+    try
+    {
+        syncDescriptor(descriptor);
+    }
+    catch (...)
+    {
+        close(descriptor);
+        throw;
+    }
+
+    close(descriptor);
+}
+
+static void writeAll(int descriptor, const std::string& contents)
+{
+    std::size_t totalWritten = 0;
+
+    while (totalWritten < contents.size())
+    {
+        ssize_t written = write(
+            descriptor,
+            contents.data() + totalWritten,
+            contents.size() - totalWritten
+        );
+
+        if (written < 0)
+        {
+            if (errno == EINTR)
+            {
+                continue;
+            }
+
+            throw std::runtime_error("Failed to write durable file");
+        }
+
+        if (written == 0)
+        {
+            throw std::runtime_error("Failed to write durable file");
+        }
+
+        totalWritten += static_cast<std::size_t>(written);
+    }
+}
+
+static void atomicWrite(const std::string& path,
+                        const std::string& contents)
+{
+    std::string temporaryPath = path + ".tmp";
+    int descriptor = open(
+        temporaryPath.c_str(),
+        O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC,
+        0600
+    );
+
+    if (descriptor == -1)
+    {
+        throw std::runtime_error(
+            "Cannot create temporary file: " + temporaryPath
+        );
+    }
+
+    try
+    {
+        writeAll(descriptor, contents);
+        syncDescriptor(descriptor);
+
+        if (close(descriptor) == -1)
+        {
+            descriptor = -1;
+            throw std::runtime_error("Cannot close temporary file");
+        }
+        descriptor = -1;
+
+        if (rename(temporaryPath.c_str(), path.c_str()) == -1)
+        {
+            throw std::runtime_error("Cannot replace durable file: " + path);
+        }
+
+        syncDirectory(path);
+    }
+    catch (...)
+    {
+        if (descriptor != -1)
+        {
+            close(descriptor);
+        }
+
+        unlink(temporaryPath.c_str());
+        throw;
+    }
+}
+
 bool WriteAheadLog::isEmpty()
 {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -36,25 +155,111 @@ bool WriteAheadLog::isEmpty()
     return info.st_size == 0;
 }
 
-WriteAheadLog::WriteAheadLog(const std::string& path)
+std::string WriteAheadLog::readSnapshot()
 {
-    fileDescriptor_ = open(
-        path.c_str(),
-        O_RDWR | O_CREAT | O_APPEND | O_CLOEXEC,
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::string snapshotPath = path_ + ".snapshot";
+    int descriptor = open(snapshotPath.c_str(), O_RDONLY | O_CLOEXEC);
+
+    if (descriptor == -1)
+    {
+        if (errno == ENOENT)
+        {
+            return {};
+        }
+
+        throw std::runtime_error("Cannot open snapshot: " + snapshotPath);
+    }
+
+    std::string contents;
+    char buffer[4096];
+
+    while (true)
+    {
+        ssize_t bytesRead = read(descriptor, buffer, sizeof(buffer));
+
+        if (bytesRead == 0)
+        {
+            break;
+        }
+
+        if (bytesRead < 0)
+        {
+            if (errno == EINTR)
+            {
+                continue;
+            }
+
+            close(descriptor);
+            throw std::runtime_error("Cannot read snapshot");
+        }
+
+        contents.append(buffer, static_cast<std::size_t>(bytesRead));
+    }
+
+    close(descriptor);
+    return contents;
+}
+
+void WriteAheadLog::writeSnapshot(const std::string& contents)
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    atomicWrite(path_ + ".snapshot", contents);
+}
+
+void WriteAheadLog::reset(std::uint64_t baseSequence)
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    if (failed_)
+    {
+        throw std::runtime_error("WAL unavailable after a write failure");
+    }
+
+    std::string contents = "BASE " + std::to_string(baseSequence) + "\n";
+    atomicWrite(path_, contents);
+
+    int replacementDescriptor = open(
+        path_.c_str(),
+        O_RDWR | O_APPEND | O_CLOEXEC
+    );
+
+    if (replacementDescriptor == -1)
+    {
+        failed_ = true;
+        throw std::runtime_error("Cannot reopen compacted WAL");
+    }
+
+    int oldDescriptor = fileDescriptor_;
+    fileDescriptor_ = replacementDescriptor;
+
+    if (close(oldDescriptor) == -1)
+    {
+        failed_ = true;
+        throw std::runtime_error("Cannot close replaced WAL");
+    }
+}
+
+WriteAheadLog::WriteAheadLog(const std::string& path)
+    : fileDescriptor_(-1),
+      lockDescriptor_(-1),
+      path_(path)
+{
+    std::string lockPath = path_ + ".lock";
+    lockDescriptor_ = open(
+        lockPath.c_str(),
+        O_RDWR | O_CREAT | O_CLOEXEC,
         0600
     );
 
-    if (fileDescriptor_ == -1)
+    if (lockDescriptor_ == -1)
     {
-        throw std::runtime_error("Cannot open WAL: " + path);
+        throw std::runtime_error("Cannot open WAL lock: " + lockPath);
     }
-
-    int directoryFd = -1;
 
     try
     {
-        // Only one cooperating server can own this WAL.
-        while (flock(fileDescriptor_, LOCK_EX | LOCK_NB) == -1)
+        while (flock(lockDescriptor_, LOCK_EX | LOCK_NB) == -1)
         {
             if (errno == EINTR)
             {
@@ -64,63 +269,56 @@ WriteAheadLog::WriteAheadLog(const std::string& path)
             if (errno == EWOULDBLOCK || errno == EAGAIN)
             {
                 throw std::runtime_error(
-                    "WAL is already in use: " + path
+                    "WAL is already in use: " + path_
                 );
             }
 
-            throw std::runtime_error("Cannot lock WAL: " + path);
+            throw std::runtime_error("Cannot lock WAL: " + path_);
         }
 
-        // Sync the file before its directory entry.
-        syncDescriptor(fileDescriptor_);
-
-        std::string directory = ".";
-        std::size_t slash = path.find_last_of('/');
-
-        if (slash != std::string::npos)
-        {
-            if (slash == 0)
-            {
-                directory = "/";
-            }
-            else
-            {
-                directory = path.substr(0, slash);
-            }
-        }
-
-        directoryFd = open(
-            directory.c_str(),
-            O_RDONLY | O_DIRECTORY | O_CLOEXEC
+        fileDescriptor_ = open(
+            path_.c_str(),
+            O_RDWR | O_CREAT | O_APPEND | O_CLOEXEC,
+            0600
         );
 
-        if (directoryFd == -1)
+        if (fileDescriptor_ == -1)
         {
-            throw std::runtime_error(
-                "Cannot open WAL directory: " + directory
-            );
+            throw std::runtime_error("Cannot open WAL: " + path_);
         }
 
-        syncDescriptor(directoryFd);
-
-        close(directoryFd);
-        directoryFd = -1;
+        syncDescriptor(fileDescriptor_);
+        syncDirectory(path_);
     }
     catch (...)
     {
-        if (directoryFd != -1)
+        if (fileDescriptor_ != -1)
         {
-            close(directoryFd);
+            close(fileDescriptor_);
+            fileDescriptor_ = -1;
         }
 
-        close(fileDescriptor_);
+        if (lockDescriptor_ != -1)
+        {
+            close(lockDescriptor_);
+            lockDescriptor_ = -1;
+        }
+
         throw;
     }
 }
 
 WriteAheadLog::~WriteAheadLog()
 {
-    close(fileDescriptor_);
+    if (fileDescriptor_ != -1)
+    {
+        close(fileDescriptor_);
+    }
+
+    if (lockDescriptor_ != -1)
+    {
+        close(lockDescriptor_);
+    }
 }
 
 bool WriteAheadLog::append(const std::string& record)

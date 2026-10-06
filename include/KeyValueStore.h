@@ -1,6 +1,7 @@
 #pragma once
 
 #include <chrono>
+#include <cstdint>
 #include <mutex>
 #include <string>
 #include <unordered_map>
@@ -20,6 +21,8 @@ public:
 
     bool remove(const std::string& key);
 
+    void compact();
+
 private:
     struct Entry
     {
@@ -36,4 +39,5 @@ private:
 
     WriteAheadLog* log_;
     bool healthy_ = true;
+    std::uint64_t sequence_ = 0;
 };

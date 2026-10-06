@@ -1,4 +1,5 @@
 #include <sstream>
+#include <iomanip>
 #include "CommandHandler.h"
 #include <exception>
 #include <iostream>
@@ -19,7 +20,7 @@ static bool processCommandImpl(
 
     if (command == "PUT")
     {
-        if (!(input >> key >> value))
+        if (!(input >> std::quoted(key) >> std::quoted(value)))
         {
             response = "ERROR Usage: PUT key value [ttl_seconds]";
             return true;
@@ -53,7 +54,7 @@ static bool processCommandImpl(
     }
     else if (command == "GET" || command == "DELETE")
     {
-        if (!(input >> key) || (input >> extra))
+        if (!(input >> std::quoted(key)) || (input >> extra))
         {
             response = "ERROR Usage: " + command + " key";
             return true;
@@ -92,6 +93,17 @@ static bool processCommandImpl(
 
         response = "BYE";
         return false;
+    }
+    else if (command == "COMPACT")
+    {
+        if (input >> extra)
+        {
+            response = "ERROR Usage: COMPACT";
+            return true;
+        }
+
+        store.compact();
+        response = "OK";
     }
     else
     {

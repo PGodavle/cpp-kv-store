@@ -1,4 +1,5 @@
 #include <iostream>
+#include <iomanip>
 #include <sstream>
 #include <string>
 
@@ -42,7 +43,7 @@ int main()
         if (command == "PUT")
         {
         // Key and value are required.
-        if (!(input >> key >> value))
+        if (!(input >> std::quoted(key) >> std::quoted(value)))
         {
             std::cout << "Usage: PUT key value [ttl_seconds]\n";
             continue;
@@ -79,7 +80,7 @@ int main()
         }
         else if (command == "GET")
         {
-            if (!(input >> key) || (input >> extra))
+            if (!(input >> std::quoted(key)) || (input >> extra))
             {
                 std::cout << "Usage: GET key\n";
                 continue;

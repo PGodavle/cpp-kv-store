@@ -1,125 +1,94 @@
 # C++ Key-Value Store
 
-A key-value store built from scratch in C++17 to explore storage,
-concurrency, networking, and persistence.
+A C++17 key-value store project exploring concurrency, TCP networking, and durable local storage.
 
-The current version provides an in-memory store with an interactive
-command-line interface.
+## Features
 
-## Current Features
-
-- Insert and update values using `PUT`.
-- Retrieve values using `GET`.
-- Delete entries using `DELETE`.
-- Report missing keys.
-- Validate command arguments.
-- Mutex-protected storage operations.
-- Optional TTL with lazy expiration.
-- TCP server supporting PUT, GET, DELETE, and EXIT.
-- Newline-delimited commands with partial-read/write handling.
-- Shared in-memory data across successive client connections.
+- `PUT`, `GET`, and `DELETE` operations with optional TTL.
+- Mutex-protected in-memory storage shared by concurrent server workers.
+- TCP server with a fixed-size worker pool and bounded connection queue.
+- Write-ahead log (WAL) with synchronous writes and startup recovery.
+- Snapshots and WAL compaction, triggered with the `COMPACT` command.
+- Quoted keys and values can contain spaces; unquoted single-word commands remain supported.
+- Interactive local CLI and a TCP client.
+- CTest coverage for storage recovery, command parsing, thread safety, and queue behavior.
 
 ## Requirements
 
-- Linux or Ubuntu on WSL2
-- A C++17-compatible compiler
-- CMake 3.16 or newer
-- Make
+- Linux (the server uses Linux APIs such as `signalfd`).
+- A C++17-compatible compiler.
+- CMake 3.16 or newer.
+- Make or another CMake-supported build tool.
 
-Install the development tools on Ubuntu:
-
-```bash
-sudo apt update
-sudo apt install build-essential gdb cmake git
-```
-
-## Build and Run
-
-Run these commands from the project directory:
+## Build and Test
 
 ```bash
 cmake -S . -B build
 cmake --build build
+ctest --test-dir build --output-on-failure
+```
+
+Run the local in-memory CLI:
+
+```bash
 ./build/kv_store
 ```
 
-## Supported Commands
+Run the server and client in separate terminals:
+
+```bash
+./build/kv_server
+./build/kv_client
+```
+
+The server defaults to `127.0.0.1:9090` and stores data in `data/store.wal`.
+It creates a sibling `.snapshot` file during compaction and a `.lock` file to prevent multiple servers from using the same WAL.
+
+Server options:
+
+```text
+kv_server [--host IPv4] [--port PORT] [--workers COUNT]
+          [--queue-capacity COUNT] [--wal PATH]
+```
+
+Defaults are host `127.0.0.1`, port `9090`, four workers, queue capacity `8`, and WAL path `data/store.wal`. Use `--help` to print the usage line. The server accepts an IPv4 address; bind to `0.0.0.0` only when access from other machines is intended.
+
+The client accepts an optional host and port:
+
+```bash
+./build/kv_client [HOST [PORT]]
+```
+
+## Commands
+
+Commands are uppercase. Keys and values are case-sensitive. Quote tokens containing spaces; backslash and quote characters can be escaped inside quoted tokens.
 
 | Command | Description |
 |---------|-------------|
-| `PUT key value` | Insert a key or replace its existing value |
-| `GET key` | Print the value, or `NOT_FOUND` |
-| `DELETE key` | Print `DELETED`, or `NOT_FOUND` |
-| `EXIT` | Exit the program |
+| `PUT key value [ttl_seconds]` | Insert or replace a value; TTL is optional and must be non-negative. |
+| `GET key` | Return the value or `NOT_FOUND`. |
+| `DELETE key` | Delete a key or return `NOT_FOUND`. |
+| `COMPACT` | Write a snapshot and replace the WAL with a checkpoint. |
+| `EXIT` | End the TCP client session. |
 
-Commands are uppercase. Keys and values are case-sensitive and
-must be single words in this version.
-
-### Example Session
+Example:
 
 ```text
-> PUT name Parikshit
+PUT "first name" "Ada Lovelace"
 OK
-
-> GET name
-Parikshit
-
-> PUT name Rudra
+GET "first name"
+Ada Lovelace
+PUT session temporary 60
+COMPACT
 OK
-
-> GET name
-Rudra
-
-> DELETE name
-DELETED
-
-> GET name
-NOT_FOUND
-
-> EXIT
-Goodbye!
+EXIT
+BYE
 ```
 
-## Project Structure
+The local CLI supports `PUT`, `GET`, `DELETE`, and `EXIT`. Its data is in-memory only; persistence is enabled by the TCP server.
 
-```text
-cpp-kv-store/
-├── CMakeLists.txt
-├── README.md
-├── .gitignore
-├── include/
-│   └── KeyValueStore.h
-└── src/
-    ├── KeyValueStore.cpp
-    └── main.cpp
-```
+## Storage Behavior
 
-## Implementation
+Mutations are appended to the WAL and synchronized before the in-memory map is updated. On startup, the store loads the latest snapshot and replays later WAL records. TTL expiration uses a monotonic clock while running and persisted wall-clock expiry timestamps for recovery. Expired entries are removed lazily when accessed; compaction omits already-expired entries.
 
-- `KeyValueStore` manages data using
-  `std::unordered_map<std::string, std::string>`.
-- `main.cpp` handles command parsing and terminal output.
-- `get` returns a boolean and copies the retrieved value into an
-  output parameter. When the key is missing, the output parameter
-  remains unchanged.
-- The storage class does not perform terminal input or output.
-
-## Current Limitations
-
-- The TCP server serves one connected client at a time.
-- All data is lost when the server stops.
-- Expired entries remain in memory until accessed or deleted.
-- Keys and values must be single words.
-- No eviction or configured total storage limit.
-
-## Planned Improvements
-
-- [ ] Thread-safe access
-- [ ] Automated tests
-- [ ] TTL expiration
-- [ ] TCP server and client
-- [ ] Thread pool and bounded request queue
-- [ ] Write-ahead logging and crash recovery
-- [ ] Snapshots
-- [ ] LRU eviction
-- [ ] Performance benchmarks
+Compaction is currently manual through the TCP `COMPACT` command. The project does not yet implement automatic compaction, eviction, a total storage limit, authentication, or TLS. The newline-delimited protocol does not support literal newline characters inside a key or value.
