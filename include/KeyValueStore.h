@@ -1,13 +1,18 @@
 #pragma once
 
+#include <chrono>
 #include <mutex>
 #include <string>
 #include <unordered_map>
 
+#include "WriteAheadLog.h"
+
 class KeyValueStore
 {
 public:
-     void put(const std::string& key,
+    explicit KeyValueStore(WriteAheadLog* log = nullptr);
+
+    void put(const std::string& key,
              const std::string& value,
              int ttlSeconds = 0);
 
@@ -16,12 +21,19 @@ public:
     bool remove(const std::string& key);
 
 private:
-    struct Entry{
+    struct Entry
+    {
         std::string value;
         bool hasExpiry = false;
         std::chrono::steady_clock::time_point expiresAt{};
     };
+
+    void checkHealthy() const;
+    void appendRecord(const std::string& record);
+    void recover();
     std::unordered_map<std::string, Entry> data_;
     mutable std::mutex mutex_;
-    //why
+
+    WriteAheadLog* log_;
+    bool healthy_ = true;
 };

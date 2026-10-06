@@ -1,7 +1,9 @@
 #include <sstream>
 #include "CommandHandler.h"
+#include <exception>
+#include <iostream>
 
-bool processCommand(
+static bool processCommandImpl(
     KeyValueStore& store,
     const std::string& line,
     std::string& response)
@@ -97,4 +99,24 @@ bool processCommand(
     }
 
     return true;
+}
+bool processCommand(
+    KeyValueStore& store,
+    const std::string& line,
+    std::string& response)
+{
+    try
+    {
+        return processCommandImpl(store, line, response);
+    }
+    catch (const std::exception& error)
+    {
+        std::cerr << "Command failed: "
+                  << error.what() << '\n';
+
+        response = "ERROR SERVER_ERROR";
+
+        // Send the error, then close this client's session.
+        return false;
+    }
 }

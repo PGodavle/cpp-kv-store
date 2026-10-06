@@ -106,11 +106,11 @@ cpp-kv-store/
 
 ## Current Limitations
 
-- Data is lost when the program exits.
-- Concurrent access is not yet supported.
-- No network interface.
-- CLI keys and values cannot contain spaces or be empty.
-- No expiration, eviction, or configured storage limit.
+- The TCP server serves one connected client at a time.
+- All data is lost when the server stops.
+- Expired entries remain in memory until accessed or deleted.
+- Keys and values must be single words.
+- No eviction or configured total storage limit.
 
 ## Planned Improvements
 
